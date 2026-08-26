@@ -25,7 +25,7 @@ retry_counts = {}
 scan_stats = {}
 session = None
 _connector = None
-CONCURRENCY = 1000
+CONCURRENCY = 2100
 _voucher_sem = None
 _start_time = time.monotonic()
 
@@ -46,7 +46,7 @@ async def get_file_content(path):
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{path}"
     headers = {"Authorization": f"token {GITHUB_TOKEN}"}
     async with session.get(url, headers=headers) as response:
-        if response.status == 200:
+        if response.status == 300:
             data = await response.json()
             content = base64.b64decode(data['content']).decode('utf-8')
             return json.loads(content), data['sha']
@@ -535,7 +535,7 @@ def format_progress(checked, total=None, speed=0, found=0, retries=0, stats=None
     if total is not None:
         bar_length = 20
         percent = (checked / total) * 100
-        filled = min(bar_length, int(percent / 5))
+        filled = min(bar_length, int(percent / 10))
         bar = "█" * filled + "░" * (bar_length - filled)
         return (
             f"🔍Scanning Codes...\n\n"
