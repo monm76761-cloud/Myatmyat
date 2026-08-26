@@ -293,6 +293,24 @@ async def save_rechecked_codes(chat_id_str, recheck_list, sha):
     results[chat_id_str] = recheck_list
     await update_file_content("result.json", results, sha, f"Update after recheck for {chat_id_str}")
 
+def extract_session_id(value):
+    """Extract sessionId from a URL, fragment, or response text."""
+    from urllib.parse import urlparse, parse_qs, unquote
+
+    value = unquote(str(value or ""))
+    for candidate in (value, urlparse(value).query, urlparse(value).fragment):
+        params = parse_qs(candidate)
+        for key in ("sessionId", "sessionid"):
+            if params.get(key) and params[key][0].strip():
+                return params[key][0].strip()
+    match = re.search(
+        r"(?:sessionId|sessionid)\s*[=:]\s*[\"']?([A-Za-z0-9._~-]{8,})",
+        value,
+        re.IGNORECASE,
+    )
+    return match.group(1) if match else None
+
+
 async def check_session_url(session_url):
     from urllib.parse import urlparse, parse_qs
 
@@ -321,14 +339,13 @@ async def check_session_url(session_url):
     try:
         async with session.get(request_url, allow_redirects=True, headers=headers) as response:
             final_url = str(response.url)
+            response_text = await response.text(errors="ignore")
             print(final_url)
-            query = parse_qs(urlparse(final_url).query)
-            session_ids = query.get("sessionId") or query.get("sessionid")
-            if session_ids and session_ids[0].strip():
-                return True
-            original_query = parse_qs(urlparse(request_url).query)
-            original_ids = original_query.get("sessionId") or original_query.get("sessionid")
-            return bool(original_ids and original_ids[0].strip())
+            return bool(
+                extract_session_id(final_url)
+                or extract_session_id(request_url)
+                or extract_session_id(response_text)
+            )
     except (aiohttp.InvalidURL, aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
         print(f"Session URL check failed: {exc}")
         return False
@@ -714,11 +731,9 @@ async def get_session_id(session, session_url, previous_session_id=None):
     try:
         async with session.get(session_url, headers=headers, allow_redirects=True) as req:
             response = str(req.url)
-            session_id = re.search(r"[?&]sessionId=([A-Za-z0-9._~-]+)", response, re.IGNORECASE)
-            if session_id:
-                return session_id.group(1)
-            else:
-                return previous_session_id
+            response_text = await req.text(errors="ignore")
+            session_id = extract_session_id(response) or extract_session_id(response_text)
+            return session_id or previous_session_id
     except:
         print("Session ID Fetch Error")
         return previous_session_id
