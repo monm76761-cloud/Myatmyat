@@ -312,14 +312,22 @@ def extract_session_id(value):
 
 
 async def check_session_url(session_url):
-    from urllib.parse import urlparse, parse_qs
+    from urllib.parse import urlparse
 
-    # Validate with a fresh MAC, matching the session-id request flow below.
     session_url = session_url.strip().rstrip('.,)>]')
-    request_url = replace_mac(session_url, new_mac=get_mac())
-    parsed_url = urlparse(request_url)
-    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+    parsed_url = urlparse(session_url)
+    hostname = (parsed_url.hostname or "").lower()
+    if parsed_url.scheme not in {"http", "https"} or not hostname:
         return False
+
+    # This bot later calls the Ruijie portal APIs, so reject unrelated hosts.
+    if hostname != "portal-as.ruijienetworks.com":
+        print(f"Session URL rejected: unexpected host {hostname}")
+        return False
+
+    # Keep the original URL for storage, but use the same MAC refresh as the
+    # session-id request flow when probing the endpoint.
+    request_url = replace_mac(session_url, new_mac=get_mac())
 
     headers = {
         'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
@@ -340,14 +348,23 @@ async def check_session_url(session_url):
         async with session.get(request_url, allow_redirects=True, headers=headers) as response:
             final_url = str(response.url)
             response_text = await response.text(errors="ignore")
-            print(final_url)
-            return bool(
+            found_session_id = (
                 extract_session_id(final_url)
                 or extract_session_id(request_url)
                 or extract_session_id(response_text)
             )
+            print(
+                f"Session URL probe: status={response.status}, "
+                f"final_host={urlparse(final_url).hostname}, "
+                f"session_id_found={bool(found_session_id)}"
+            )
+
+            # A session URL may not expose sessionId until the next API call.
+            # Treat any non-server-error response from the expected portal as
+            # reachable; get_session_id() performs the definitive check later.
+            return 200 <= response.status < 500
     except (aiohttp.InvalidURL, aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
-        print(f"Session URL check failed: {exc}")
+        print(f"Session URL check failed: {type(exc).__name__}: {exc}")
         return False
 
 @bot.message_handler(commands=['input'])
