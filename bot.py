@@ -264,6 +264,9 @@ async def recheck(message):
             if "session_url" not in user_data[message.chat.id]:
                 await bot.reply_to(message, "/recheck ကိုအသုံးမပြုမီ /input ဖြင့် Session URL ကိုအရင်ထည့်သွင်းပေးရပါမည်။")
                 return
+            if "session_url" not in user_data[message.chat.id]:
+                await bot.reply_to(message, "/recheck ကိုအသုံးမပြုမီ /input ဖြင့် Session URL ကိုအရင်ထည့်သွင်းပေးရပါမည်။")
+                return
             codes = results[chat_id_str]
             await bot.reply_to(message, f"Success Code များအား ပြန်လည်စစ်ဆေးနေပါသည်။")
             session_url_recheck = user_data[message.chat.id]["session_url"]
