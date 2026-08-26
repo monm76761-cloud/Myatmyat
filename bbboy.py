@@ -311,13 +311,18 @@ async def check_session_url(session_url):
     }
     try:
         async with session.get(session_url, allow_redirects=True, headers=headers) as response:
-            text_ = str(response.url)
-            print(text_)
-            if "sessionId" in text_:
+            from urllib.parse import urlparse, parse_qs
+            final_url = str(response.url)
+            print(final_url)
+            query = parse_qs(urlparse(final_url).query)
+            session_ids = query.get("sessionId") or query.get("sessionid")
+            if session_ids and session_ids[0].strip():
                 return True
-            else:
-                return False
-    except:
+            original_query = parse_qs(urlparse(session_url).query)
+            original_ids = original_query.get("sessionId") or original_query.get("sessionid")
+            return bool(original_ids and original_ids[0].strip())
+    except (aiohttp.InvalidURL, aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+        print(f"Session URL check failed: {exc}")
         return False
 
 @bot.message_handler(commands=['input'])
@@ -329,7 +334,8 @@ async def handle_input(message):
             "Usage:\n\n/input your_session_url"
         )
         return
-    url = args[1]
+    url = args[1].strip().rstrip('.,)>]')
+    user_data.setdefault(message.chat.id, {})
     if message.chat.id in user_data:
         await bot.reply_to(message, "Session URL အားစစ်ဆေးနေပါသည်။")
         if await check_session_url(session_url=url):
@@ -700,7 +706,7 @@ async def get_session_id(session, session_url, previous_session_id=None):
     try:
         async with session.get(session_url, headers=headers, allow_redirects=True) as req:
             response = str(req.url)
-            session_id = re.search(r"[?&]sessionId=([a-zA-Z0-9]+)", response)
+            session_id = re.search(r"[?&]sessionId=([A-Za-z0-9._~-]+)", response, re.IGNORECASE)
             if session_id:
                 return session_id.group(1)
             else:
