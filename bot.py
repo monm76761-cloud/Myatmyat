@@ -25,7 +25,7 @@ retry_counts = {}
 scan_stats = {}
 session = None
 _connector = None
-CONCURRENCY = 100
+CONCURRENCY = 1000
 _voucher_sem = None
 _start_time = time.monotonic()
 
@@ -261,9 +261,6 @@ async def recheck(message):
     results, sha = await get_file_content("result.json")
     chat_id_str = str(message.chat.id)
     if chat_id_str in results and results[chat_id_str]:
-            if "session_url" not in user_data[message.chat.id]:
-                await bot.reply_to(message, "/recheck ကိုအသုံးမပြုမီ /input ဖြင့် Session URL ကိုအရင်ထည့်သွင်းပေးရပါမည်။")
-                return
             if "session_url" not in user_data[message.chat.id]:
                 await bot.reply_to(message, "/recheck ကိုအသုံးမပြုမီ /input ဖြင့် Session URL ကိုအရင်ထည့်သွင်းပေးရပါမည်။")
                 return
