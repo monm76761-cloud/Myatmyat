@@ -25,7 +25,7 @@ retry_counts = {}
 scan_stats = {}
 session = None
 _connector = None
-CONCURRENCY = 100
+CONCURRENCY = 1000
 _voucher_sem = None
 _start_time = time.monotonic()
 
@@ -264,6 +264,9 @@ async def recheck(message):
             if "session_url" not in user_data[message.chat.id]:
                 await bot.reply_to(message, "/recheck ကိုအသုံးမပြုမီ /input ဖြင့် Session URL ကိုအရင်ထည့်သွင်းပေးရပါမည်။")
                 return
+            if "session_url" not in user_data[message.chat.id]:
+                await bot.reply_to(message, "/recheck ကိုအသုံးမပြုမီ /input ဖြင့် Session URL ကိုအရင်ထည့်သွင်းပေးရပါမည်။")
+                return
             codes = results[chat_id_str]
             await bot.reply_to(message, f"Success Code များအား ပြန်လည်စစ်ဆေးနေပါသည်။")
             session_url_recheck = user_data[message.chat.id]["session_url"]
@@ -290,7 +293,38 @@ async def save_rechecked_codes(chat_id_str, recheck_list, sha):
     results[chat_id_str] = recheck_list
     await update_file_content("result.json", results, sha, f"Update after recheck for {chat_id_str}")
 
+def extract_session_id(value):
+    """Extract sessionId from a URL, fragment, or response text."""
+    from urllib.parse import urlparse, parse_qs, unquote
+
+    value = unquote(str(value or ""))
+    for candidate in (value, urlparse(value).query, urlparse(value).fragment):
+        params = parse_qs(candidate)
+        for key in ("sessionId", "sessionid"):
+            if params.get(key) and params[key][0].strip():
+                return params[key][0].strip()
+    match = re.search(
+        r"(?:sessionId|sessionid)\s*[=:]\s*[\"']?([A-Za-z0-9._~-]{8,})",
+        value,
+        re.IGNORECASE,
+    )
+    return match.group(1) if match else None
+
+
 async def check_session_url(session_url):
+    from urllib.parse import urlparse
+
+    session_url = session_url.strip().rstrip('.,)>]')
+    parsed_url = urlparse(session_url)
+    hostname = (parsed_url.hostname or "").lower()
+    if parsed_url.scheme not in {"http", "https"} or not hostname:
+        return False
+
+    # Do not require a specific host here. Short links and regional portal
+    # hosts may redirect to the actual Ruijie endpoint later.
+    # Keep the original URL for storage, but use a fresh MAC while probing.
+    request_url = replace_mac(session_url, new_mac=get_mac())
+
     headers = {
         'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
         'accept-language': 'en-US,en;q=0.9',
@@ -307,15 +341,29 @@ async def check_session_url(session_url):
         'cookie': 'sensorsdata2015jssdkcross=%7B%22distinct_id%22%3A%2219e0ddbd9f2152-0df941f2efc6b08-4c657b58-1327104-19e0ddbd9f3a60%22%2C%22first_id%22%3A%22%22%2C%22props%22%3A%7B%22%24latest_traffic_source_type%22%3A%22%E8%87%AA%E7%84%B6%E6%90%9C%E7%B4%A2%E6%B5%81%E9%87%8F%22%2C%22%24latest_search_keyword%22%3A%22%E6%9C%AA%E5%8F%96%E5%88%B0%E5%80%BC%22%2C%22%24latest_referrer%22%3A%22https%3A%2F%2Fgemini.google.com%2F%22%7D%2C%22identities%22%3A%22eyIkaWRlbnRpdHlfY29va2llX2lkIjoiMTllMGRkYmQ5ZjIxNTItMGRmOTQxZjJlZmM2YjA4LTRjNjU3YjU4LTEzMjcxMDQtMTllMGRkYmQ5ZjNhNjAifQ%3D%3D%22%2C%22history_login_id%22%3A%7B%22name%22%3A%22%22%2C%22value%22%3A%22%22%7D%2C%22%24device_id%22%3A%2219e0ddbd9f2152-0df941f2efc6b08-4c657b58-1327104-19e0ddbd9f3a60%22%7D'
     }
     try:
-        async with session.get(session_url, allow_redirects=True, headers=headers) as response:
-            text_ = str(response.url)
-            print(text_)
-            if "sessionId" in text_:
-                return True
-            else:
-                return False
-    except:
-        return False
+        async with session.get(request_url, allow_redirects=True, headers=headers) as response:
+            final_url = str(response.url)
+            response_text = await response.text(errors="ignore")
+            found_session_id = (
+                extract_session_id(final_url)
+                or extract_session_id(request_url)
+                or extract_session_id(response_text)
+            )
+            print(
+                f"Session URL probe: status={response.status}, "
+                f"final_host={urlparse(final_url).hostname}, "
+                f"session_id_found={bool(found_session_id)}"
+            )
+
+            # sessionId may only appear during the subsequent API call.
+            # URL validity is checked above; the definitive session check is
+            # performed by get_session_id() when scanning starts.
+            return True
+    except (aiohttp.InvalidURL, aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+        # Do not incorrectly reject a syntactically valid URL because the
+        # portal is temporarily unavailable during the input step.
+        print(f"Session URL probe deferred: {type(exc).__name__}: {exc}")
+        return True
 
 @bot.message_handler(commands=['input'])
 async def handle_input(message):
@@ -326,7 +374,8 @@ async def handle_input(message):
             "Usage:\n\n/input your_session_url"
         )
         return
-    url = args[1]
+    url = args[1].strip().rstrip('.,)>]')
+    user_data.setdefault(message.chat.id, {})
     if message.chat.id in user_data:
         await bot.reply_to(message, "Session URL အားစစ်ဆေးနေပါသည်။")
         if await check_session_url(session_url=url):
@@ -697,11 +746,9 @@ async def get_session_id(session, session_url, previous_session_id=None):
     try:
         async with session.get(session_url, headers=headers, allow_redirects=True) as req:
             response = str(req.url)
-            session_id = re.search(r"[?&]sessionId=([a-zA-Z0-9]+)", response)
-            if session_id:
-                return session_id.group(1)
-            else:
-                return previous_session_id
+            response_text = await req.text(errors="ignore")
+            session_id = extract_session_id(response) or extract_session_id(response_text)
+            return session_id or previous_session_id
     except:
         print("Session ID Fetch Error")
         return previous_session_id
