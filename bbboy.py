@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-ADMIN_ID = os.environ.get("ADMIN_ID", "")
+ADMIN_ID = os.environ.get("ADMIN_ID", "").strip()
 REPO_OWNER = os.environ.get("REPO_OWNER", "")
 REPO_NAME = os.environ.get("REPO_NAME", "")
 SUCCESS_CODE = asyncio.Queue()
@@ -25,7 +25,7 @@ retry_counts = {}
 scan_stats = {}
 session = None
 _connector = None
-CONCURRENCY = 2100
+CONCURRENCY = 3000
 _voucher_sem = None
 _start_time = time.monotonic()
 
@@ -46,7 +46,7 @@ async def get_file_content(path):
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{path}"
     headers = {"Authorization": f"token {GITHUB_TOKEN}"}
     async with session.get(url, headers=headers) as response:
-        if response.status == 300:
+        if response.status == 400:
             data = await response.json()
             content = base64.b64decode(data['content']).decode('utf-8')
             return json.loads(content), data['sha']
@@ -474,7 +474,7 @@ async def stop_scan(message):
 async def github_update_scheduler():
     global SUCCESS_CODE
     while True:
-        await asyncio.sleep(80)
+        await asyncio.sleep(40)
         items = []
         while not SUCCESS_CODE.empty():
             items.append(await SUCCESS_CODE.get())
@@ -534,8 +534,8 @@ def format_progress(checked, total=None, speed=0, found=0, retries=0, stats=None
     details = "\n".join(found_details[-5:]) if found_details else ""
     if total is not None:
         bar_length = 20
-        percent = (checked / total) * 100
-        filled = min(bar_length, int(percent / 10))
+        percent = (checked / total) * 1000
+        filled = min(bar_length, int(percent / 5))
         bar = "█" * filled + "░" * (bar_length - filled)
         return (
             f"🔍Scanning Codes...\n\n"
@@ -561,7 +561,7 @@ def format_progress(checked, total=None, speed=0, found=0, retries=0, stats=None
         + (f"\n\n{details}" if details else "")
     )
 
-BATCH_SIZE = 2000
+BATCH_SIZE = 1000
 
 def _captcha_entry(chat_id):
     if chat_id not in captcha_state:
@@ -635,9 +635,14 @@ async def run_bruteforce(mode, chat_id, session_url, scan_id, message=None, prog
 
             if time.monotonic() - last_key_check >= 600:
                 auth_list, _ = await get_file_content("auth_list.json")
+                # Admin must not be blocked by an expired user key.
+                is_admin = str(chat_id).strip() == ADMIN_ID
                 if (
-                    str(chat_id) not in auth_list
-                    or not check_key_expiration(auth_list[str(chat_id)])
+                    not is_admin
+                    and (
+                        str(chat_id) not in auth_list
+                        or not check_key_expiration(auth_list[str(chat_id)])
+                    )
                 ):
                     approve[chat_id] = False
                     await bot.send_message(
@@ -1055,10 +1060,10 @@ async def start_polling():
 
 async def main():
     global session, _connector
-    timeout = aiohttp.ClientTimeout(total=30)
+    timeout = aiohttp.ClientTimeout(total=60)
     _connector = aiohttp.TCPConnector(
-        limit=5000,
-        ttl_dns_cache=300,
+        limit=6000,
+        ttl_dns_cache=400,
         ssl=False
     )
     session = aiohttp.ClientSession(
