@@ -453,9 +453,6 @@ async def scan(message):
 @bot.message_handler(commands=['speed'])
 async def set_speed(message):
     global CONCURRENCY, BATCH_SIZE, SPEED_MODE, SPEED_DELAY, _voucher_sem
-    if str(message.chat.id).strip() != ADMIN_ID:
-        await bot.reply_to(message, "No Permission")
-        return
     args = message.text.split(maxsplit=1)
     mode = args[1].strip().lower() if len(args) > 1 else ""
     if mode not in SPEED_PROFILES:
