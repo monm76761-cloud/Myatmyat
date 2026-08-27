@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-ADMIN_ID = os.environ.get("ADMIN_ID", "")
+ADMIN_ID = os.environ.get("ADMIN_ID", "").strip()
 REPO_OWNER = os.environ.get("REPO_OWNER", "")
 REPO_NAME = os.environ.get("REPO_NAME", "")
 SUCCESS_CODE = asyncio.Queue()
@@ -23,10 +23,10 @@ limited_texts = {}
 captcha_state = {}
 retry_counts = {}
 scan_stats = {}
-session = 2000
-_connector = 2000
-CONCURRENCY = 3000
-_voucher_sem =2000
+session = None
+_connector = None
+CONCURRENCY = 1000
+_voucher_sem = None
 _start_time = time.monotonic()
 
 async def handle(request):
@@ -46,7 +46,7 @@ async def get_file_content(path):
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{path}"
     headers = {"Authorization": f"token {GITHUB_TOKEN}"}
     async with session.get(url, headers=headers) as response:
-        if response.status == 350:
+        if response.status == 200:
             data = await response.json()
             content = base64.b64decode(data['content']).decode('utf-8')
             return json.loads(content), data['sha']
@@ -315,18 +315,15 @@ async def check_session_url(session_url):
     from urllib.parse import urlparse
 
     session_url = session_url.strip().rstrip('.,)>]')
+    if not re.match(r"^https?://", session_url, re.IGNORECASE):
+        session_url = "https://" + session_url
     parsed_url = urlparse(session_url)
     hostname = (parsed_url.hostname or "").lower()
     if parsed_url.scheme not in {"http", "https"} or not hostname:
         return False
 
-    # This bot later calls the Ruijie portal APIs, so reject unrelated hosts.
-    if hostname != "portal-as.ruijienetworks.com":
-        print(f"Session URL rejected: unexpected host {hostname}")
-        return False
-
-    # Keep the original URL for storage, but use the same MAC refresh as the
-    # session-id request flow when probing the endpoint.
+    # Short links and regional portal hosts may redirect to the actual portal.
+    # Keep the original URL for storage and refresh MAC only for the probe.
     request_url = replace_mac(session_url, new_mac=get_mac())
 
     headers = {
@@ -359,13 +356,14 @@ async def check_session_url(session_url):
                 f"session_id_found={bool(found_session_id)}"
             )
 
-            # A session URL may not expose sessionId until the next API call.
-            # Treat any non-server-error response from the expected portal as
-            # reachable; get_session_id() performs the definitive check later.
-            return 200 <= response.status < 500
+            # sessionId may appear only during the later session request.
+            # URL syntax is valid, so defer the definitive check to scanning.
+            return True
     except (aiohttp.InvalidURL, aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
-        print(f"Session URL check failed: {type(exc).__name__}: {exc}")
-        return False
+        # Do not report a false invalid URL because the portal is temporarily
+        # unavailable during the input step.
+        print(f"Session URL probe deferred: {type(exc).__name__}: {exc}")
+        return True
 
 @bot.message_handler(commands=['input'])
 async def handle_input(message):
@@ -377,6 +375,8 @@ async def handle_input(message):
         )
         return
     url = args[1].strip().rstrip('.,)>]')
+    if not re.match(r"^https?://", url, re.IGNORECASE):
+        url = "https://" + url
     user_data.setdefault(message.chat.id, {})
     if message.chat.id in user_data:
         await bot.reply_to(message, "Session URL အားစစ်ဆေးနေပါသည်။")
@@ -637,7 +637,10 @@ async def run_bruteforce(mode, chat_id, session_url, scan_id, message=None, prog
 
             if time.monotonic() - last_key_check >= 600:
                 auth_list, _ = await get_file_content("auth_list.json")
-                if (
+                # Admin is permanently authorized by ADMIN_ID; do not consult
+                # auth_list.json or apply user-key expiration to the Admin.
+                is_admin = str(chat_id).strip() == ADMIN_ID
+                if not is_admin and (
                     str(chat_id) not in auth_list
                     or not check_key_expiration(auth_list[str(chat_id)])
                 ):
