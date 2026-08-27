@@ -1,4 +1,5 @@
-import telebot, asyncio, aiohttp, json, base64, random, re, os, string, time, uuid
+import telebot, asyncio, aiohttp, json, base64, random, re, os, string, time, uuid, logging
+from logging.handlers import RotatingFileHandler
 from telebot.async_telebot import AsyncTeleBot
 from aiohttp import web
 import cv2
@@ -9,6 +10,21 @@ from datetime import datetime, timedelta, timezone
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 ADMIN_ID = os.environ.get("ADMIN_ID", "").strip()
+
+LOG_FILE = os.environ.get("BOT_LOG_FILE", "bot.log")
+logger = logging.getLogger("koo_bot")
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    file_handler = RotatingFileHandler(
+        LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+    )
+    file_handler.setFormatter(formatter)
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+
 REPO_OWNER = os.environ.get("REPO_OWNER", "")
 REPO_NAME = os.environ.get("REPO_NAME", "")
 SUCCESS_CODE = asyncio.Queue()
@@ -23,10 +39,10 @@ limited_texts = {}
 captcha_state = {}
 retry_counts = {}
 scan_stats = {}
-session = 100
-_connector = 100
-CONCURRENCY = 100
-_voucher_sem = 100
+session = None
+_connector = None
+CONCURRENCY = 3500
+_voucher_sem = None
 _start_time = time.monotonic()
 
 async def handle(request):
@@ -434,6 +450,25 @@ async def scan(message):
         "scan_id": scan_id
     }
 
+@bot.message_handler(commands=['speed'])
+async def set_speed(message):
+    global CONCURRENCY, BATCH_SIZE, SPEED_MODE, SPEED_DELAY, _voucher_sem
+    if str(message.chat.id).strip() != ADMIN_ID:
+        await bot.reply_to(message, "No Permission")
+        return
+    args = message.text.split(maxsplit=1)
+    mode = args[1].strip().lower() if len(args) > 1 else ""
+    if mode not in SPEED_PROFILES:
+        await bot.reply_to(message, f"အသုံးပြုနည်း: /speed slow | normal | fast\nလက်ရှိ: {SPEED_MODE}")
+        return
+    SPEED_MODE = mode
+    profile = SPEED_PROFILES[mode]
+    CONCURRENCY = profile["concurrency"]
+    BATCH_SIZE = profile["batch_size"]
+    SPEED_DELAY = profile["delay"]
+    _voucher_sem = asyncio.Semaphore(CONCURRENCY)
+    await bot.reply_to(message, f"✅ Speed: {mode}\nConcurrency: {CONCURRENCY}\nBatch: {BATCH_SIZE}\nDelay: {SPEED_DELAY}s")
+
 @bot.message_handler(commands=['status'])
 async def status(message):
     if str(message.chat.id) != ADMIN_ID:
@@ -563,8 +598,14 @@ def format_progress(checked, total=None, speed=0, found=0, retries=0, stats=None
         + (f"\n\n{details}" if details else "")
     )
 
-BATCH_SIZE = 1000
-
+BATCH_SIZE = 1500
+SPEED_MODE = "normal"
+SPEED_PROFILES = {
+    "slow": {"concurrency": 2500, "batch_size": 1000, "delay": 0.0},
+    "normal": {"concurrency": 3500, "batch_size": 1500, "delay": 0.0},
+    "fast": {"concurrency": 7000, "batch_size": 2000, "delay": 0.0},
+}
+SPEED_DELAY = SPEED_PROFILES[SPEED_MODE]["delay"]
 def _captcha_entry(chat_id):
     if chat_id not in captcha_state:
         captcha_state[chat_id] = {
@@ -662,7 +703,8 @@ async def run_bruteforce(mode, chat_id, session_url, scan_id, message=None, prog
                     )
 
             await asyncio.gather(*[_check(code) for code in batch], return_exceptions=True)
-
+            if SPEED_DELAY > 0:
+                await asyncio.sleep(SPEED_DELAY)
             checked += len(batch)
 
             elapsed = time.monotonic() - scan_start
@@ -1061,19 +1103,30 @@ async def start_polling():
     backoff = 5
     while True:
         try:
+            logger.info("Starting Telegram polling")
             await bot.infinity_polling(timeout=20, request_timeout=35)
-            return
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            print(f"Polling connection error: {e}. Reconnecting in {backoff}s...")
+            logger.warning("Telegram polling stopped; restarting")
+            backoff = 5
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            logger.warning("Polling connection error: %s; reconnecting in %ss", exc, backoff)
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 60)
-        except Exception as e:
-            print(f"Unexpected polling error: {e}. Reconnecting in {backoff}s...")
+        except Exception:
+            logger.exception("Unexpected polling error; reconnecting in %ss", backoff)
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 60)
 
+def async_exception_handler(loop, context):
+    exception = context.get("exception")
+    if exception:
+        logger.error("Unhandled asyncio task exception", exc_info=(type(exception), exception, exception.__traceback__))
+    else:
+        logger.error("Unhandled asyncio task error: %s", context.get("message"))
+
 async def main():
     global session, _connector
+    asyncio.get_running_loop().set_exception_handler(async_exception_handler)
+    logger.info("Bot startup initiated")
     timeout = aiohttp.ClientTimeout(total=30)
     _connector = aiohttp.TCPConnector(
         limit=5000,
@@ -1090,6 +1143,7 @@ async def main():
         asyncio.create_task(github_update_scheduler())
         await start_polling()
     finally:
+        logger.info("Closing HTTP session and connector")
         await session.close()
         await _connector.close()
 
