@@ -12,7 +12,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 REPO_OWNER = os.getenv("REPO_OWNER", "")
 REPO_NAME = os.getenv("REPO_NAME", "")
-ADMIN_ID = os.getenv("ADMIN_ID", "")
+ADMIN_ID = os.getenv("ADMIN_ID", "").strip()
 
 # ── Global structures ─────────────────────────────────────────────────────
 SUCCESS_CODE = asyncio.Queue()
@@ -63,8 +63,8 @@ async def send_chunks(chat_id, text, parse_mode="Markdown", reply_to_message_id=
         await bot.send_message(chat_id, chunk, parse_mode=parse_mode,
                                reply_to_message_id=reply_to_message_id if first else None)
 
-CONCURRENCY = 1000
-_voucher_sem = 1000
+CONCURRENCY = 200
+_voucher_sem = None
 _start_time = time.monotonic()
 
 # ── Web server (keep alive) ────────────────────────────────────────────────
@@ -76,7 +76,7 @@ async def web_server():
     app.router.add_get('/', handle)
     runner = web.AppRunner(app)
     await runner.setup()
-    port = int(os.environ.get('BOT_PORT', 8090))
+    port = int(os.environ.get('BOT_PORT', 5000))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
 
@@ -85,7 +85,7 @@ async def get_file_content(path):
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{path}"
     headers = {"Authorization": f"token {GITHUB_TOKEN}"}
     async with session.get(url, headers=headers) as response:
-        if response.status == 300:
+        if response.status == 200:
             data = await response.json()
             content = base64.b64decode(data['content']).decode('utf-8')
             return json.loads(content), data['sha']
@@ -600,9 +600,13 @@ async def run_bruteforce(mode, chat_id, session_url, scan_id, target=None, messa
 
             if time.monotonic() - last_key_check >= 600:
                 auth_list, _ = await get_file_content("auth_list.json")
+                is_admin = str(chat_id).strip() == ADMIN_ID
                 if (
-                    str(chat_id) not in auth_list
-                    or not check_key_expiration(auth_list[str(chat_id)])
+                    not is_admin
+                    and (
+                        str(chat_id) not in auth_list
+                        or not check_key_expiration(auth_list[str(chat_id)])
+                    )
                 ):
                     approve[chat_id] = False
                     await bot.send_message(chat_id, "သင်၏ key သက်တမ်း ကုန်ဆုံးသွားပါပြီ။")
@@ -782,7 +786,16 @@ async def help_cmd(message):
 
 @bot.message_handler(commands=['key'])
 async def handle_key(message):
-    key = str(message.chat.id)
+    key = str(message.chat.id).strip()
+
+    # Admin is trusted through ADMIN_ID and does not need a registered user key.
+    if key == ADMIN_ID:
+        approve[message.chat.id] = True
+        user_data.setdefault(message.chat.id, {})
+        save_state()
+        await bot.reply_to(message, "✅ Admin အဖြစ် အတည်ပြုပြီးပါပြီ။ /setup ဖြင့် Session URL ထည့်ပါ။")
+        return
+
     auth_list, _ = await get_file_content("auth_list.json")
     if key in auth_list:
         if check_key_expiration(auth_list[key]):
