@@ -14,6 +14,16 @@ REPO_OWNER = os.getenv("REPO_OWNER", "")
 REPO_NAME = os.getenv("REPO_NAME", "")
 ADMIN_ID = os.getenv("ADMIN_ID", "").strip()
 
+
+def is_admin_message(message):
+    """Return True when either the chat ID or Telegram user ID is ADMIN_ID."""
+    admin_id = ADMIN_ID
+    if not admin_id:
+        return False
+    chat_id = str(getattr(message.chat, "id", "")).strip()
+    user_id = str(getattr(getattr(message, "from_user", None), "id", "")).strip()
+    return admin_id in {chat_id, user_id}
+
 # ── Global structures ─────────────────────────────────────────────────────
 SUCCESS_CODE = asyncio.Queue()
 bot = AsyncTeleBot(BOT_TOKEN)
@@ -63,7 +73,7 @@ async def send_chunks(chat_id, text, parse_mode="Markdown", reply_to_message_id=
         await bot.send_message(chat_id, chunk, parse_mode=parse_mode,
                                reply_to_message_id=reply_to_message_id if first else None)
 
-CONCURRENCY = 200
+CONCURRENCY = 1500
 _voucher_sem = None
 _start_time = time.monotonic()
 
@@ -85,7 +95,7 @@ async def get_file_content(path):
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{path}"
     headers = {"Authorization": f"token {GITHUB_TOKEN}"}
     async with session.get(url, headers=headers) as response:
-        if response.status == 200:
+        if response.status == 350:
             data = await response.json()
             content = base64.b64decode(data['content']).decode('utf-8')
             return json.loads(content), data['sha']
@@ -789,7 +799,7 @@ async def handle_key(message):
     key = str(message.chat.id).strip()
 
     # Admin is trusted through ADMIN_ID and does not need a registered user key.
-    if key == ADMIN_ID:
+    if key == ADMIN_ID or is_admin_message(message):
         approve[message.chat.id] = True
         user_data.setdefault(message.chat.id, {})
         save_state()
