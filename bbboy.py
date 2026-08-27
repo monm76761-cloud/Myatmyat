@@ -23,10 +23,10 @@ limited_texts = {}
 captcha_state = {}
 retry_counts = {}
 scan_stats = {}
-session = 2000
-_connector = 2000
-CONCURRENCY = 2000
-_voucher_sem = 2000
+session = 1000
+_connector = 1000
+CONCURRENCY = 1000
+_voucher_sem = 1000
 _start_time = time.monotonic()
 
 async def handle(request):
@@ -46,7 +46,7 @@ async def get_file_content(path):
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{path}"
     headers = {"Authorization": f"token {GITHUB_TOKEN}"}
     async with session.get(url, headers=headers) as response:
-        if response.status == 350:
+        if response.status == 200:
             data = await response.json()
             content = base64.b64decode(data['content']).decode('utf-8')
             return json.loads(content), data['sha']
@@ -563,7 +563,7 @@ def format_progress(checked, total=None, speed=0, found=0, retries=0, stats=None
         + (f"\n\n{details}" if details else "")
     )
 
-BATCH_SIZE = 2000
+BATCH_SIZE = 1000
 
 def _captcha_entry(chat_id):
     if chat_id not in captcha_state:
