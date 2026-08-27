@@ -23,10 +23,10 @@ limited_texts = {}
 captcha_state = {}
 retry_counts = {}
 scan_stats = {}
-session = 1000
-_connector = 1000
-CONCURRENCY = 1000
-_voucher_sem = 1000
+session = 100
+_connector = 100
+CONCURRENCY = 100
+_voucher_sem = 100
 _start_time = time.monotonic()
 
 async def handle(request):
