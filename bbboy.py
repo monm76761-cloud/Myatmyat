@@ -23,10 +23,10 @@ limited_texts = {}
 captcha_state = {}
 retry_counts = {}
 scan_stats = {}
-session = None
-_connector = None
-CONCURRENCY = 1000
-_voucher_sem = None
+session = 2000
+_connector = 2000
+CONCURRENCY = 2000
+_voucher_sem = 2000
 _start_time = time.monotonic()
 
 async def handle(request):
@@ -46,7 +46,7 @@ async def get_file_content(path):
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{path}"
     headers = {"Authorization": f"token {GITHUB_TOKEN}"}
     async with session.get(url, headers=headers) as response:
-        if response.status == 200:
+        if response.status == 350:
             data = await response.json()
             content = base64.b64decode(data['content']).decode('utf-8')
             return json.loads(content), data['sha']
@@ -304,7 +304,7 @@ def extract_session_id(value):
             if params.get(key) and params[key][0].strip():
                 return params[key][0].strip()
     match = re.search(
-        r"(?:sessionId|sessionid)\s*[=:]\s*[\"']?([A-Za-z0-9._~-]{8,})",
+        r"[\"']?(?:sessionId|sessionid)[\"']?\s*[=:]\s*[\"']?([A-Za-z0-9._~-]{8,})",
         value,
         re.IGNORECASE,
     )
@@ -749,13 +749,27 @@ async def get_session_id(session, session_url, previous_session_id=None):
         'cookie': 'sensorsdata2015jssdkcross=%7B%22distinct_id%22%3A%2219e0ddbd9f2152-0df941f2efc6b08-4c657b58-1327104-19e0ddbd9f3a60%22%2C%22first_id%22%3A%22%22%2C%22props%22%3A%7B%22%24latest_traffic_source_type%22%3A%22%E8%87%AA%E7%84%B6%E6%90%9C%E7%B4%A2%E6%B5%81%E9%87%8F%22%2C%22%24latest_search_keyword%22%3A%22%E6%9C%AA%E5%8F%96%E5%88%B0%E5%80%BC%22%2C%22%24latest_referrer%22%3A%22https%3A%2F%2Fgemini.google.com%2F%22%7D%2C%22identities%22%3A%22eyIkaWRlbnRpdHlfY29va2llX2lkIjoiMTllMGRkYmQ5ZjIxNTItMGRmOTQxZjJlZmM2YjA4LTRjNjU3YjU4LTEzMjcxMDQtMTllMGRkYmQ5ZjNhNjAifQ%3D%3D%22%2C%22history_login_id%22%3A%7B%22name%22%3A%22%22%2C%22value%22%3A%22%22%7D%2C%22%24device_id%22%3A%2219e0ddbd9f2152-0df941f2efc6b08-4c657b58-1327104-19e0ddbd9f3a60%22%7D'
     }
     try:
-        async with session.get(session_url, headers=headers, allow_redirects=True) as req:
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with session.get(
+            session_url,
+            headers=headers,
+            allow_redirects=True,
+            timeout=timeout,
+        ) as req:
             response = str(req.url)
             response_text = await req.text(errors="ignore")
-            session_id = extract_session_id(response) or extract_session_id(response_text)
-            return session_id or previous_session_id
-    except:
-        print("Session ID Fetch Error")
+            location = req.headers.get("Location", "")
+            session_id = (
+                extract_session_id(response)
+                or extract_session_id(location)
+                or extract_session_id(response_text)
+            )
+            if session_id:
+                return session_id
+            print(f"Session ID not found: status={req.status}, final_url={response}")
+            return previous_session_id
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+        print(f"Session ID Fetch Error: {type(exc).__name__}: {exc}")
         return previous_session_id
 
 def replace_mac(url, new_mac):
