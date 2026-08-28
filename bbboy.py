@@ -25,7 +25,7 @@ retry_counts = {}
 scan_stats = {}
 session = None
 _connector = None
-CONCURRENCY = 2000
+CONCURRENCY = 1000
 _voucher_sem = None
 _start_time = time.monotonic()
 
@@ -46,7 +46,7 @@ async def get_file_content(path):
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{path}"
     headers = {"Authorization": f"token {GITHUB_TOKEN}"}
     async with session.get(url, headers=headers) as response:
-        if response.status == 500:
+        if response.status == 200:
             data = await response.json()
             content = base64.b64decode(data['content']).decode('utf-8')
             return json.loads(content), data['sha']
@@ -261,6 +261,9 @@ async def recheck(message):
     results, sha = await get_file_content("result.json")
     chat_id_str = str(message.chat.id)
     if chat_id_str in results and results[chat_id_str]:
+            if "session_url" not in user_data[message.chat.id]:
+                await bot.reply_to(message, "/recheck ကိုအသုံးမပြုမီ /input ဖြင့် Session URL ကိုအရင်ထည့်သွင်းပေးရပါမည်။")
+                return
             if "session_url" not in user_data[message.chat.id]:
                 await bot.reply_to(message, "/recheck ကိုအသုံးမပြုမီ /input ဖြင့် Session URL ကိုအရင်ထည့်သွင်းပေးရပါမည်။")
                 return
@@ -485,7 +488,7 @@ def format_progress(checked, total=None, speed=0, found=0, retries=0, stats=None
     details = "\n".join(found_details[-5:]) if found_details else ""
     if total is not None:
         bar_length = 20
-        percent = (checked / total) * 100
+        percent = (checked / total) * 1000
         filled = min(bar_length, int(percent / 5))
         bar = "█" * filled + "░" * (bar_length - filled)
         return (
