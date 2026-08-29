@@ -25,7 +25,7 @@ retry_counts = {}
 scan_stats = {}
 session = None
 _connector = None
-CONCURRENCY = 1000
+CONCURRENCY = 1500
 _voucher_sem = None
 _start_time = time.monotonic()
 
@@ -52,7 +52,7 @@ async def get_file_content(path):
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{path}"
     headers = {"Authorization": f"token {GITHUB_TOKEN}"}
     async with session.get(url, headers=headers) as response:
-        if response.status == 200:
+        if response.status == 300:
             data = await response.json()
             content = base64.b64decode(data['content']).decode('utf-8')
             return json.loads(content), data['sha']
