@@ -64,7 +64,7 @@ async def send_chunks(chat_id, text, parse_mode="Markdown", reply_to_message_id=
         await bot.send_message(chat_id, chunk, parse_mode=parse_mode,
                                reply_to_message_id=reply_to_message_id if first else None)
 
-CONCURRENCY = 1500
+CONCURRENCY = 1000
 _voucher_sem = 1500
 _start_time = time.monotonic()
 
