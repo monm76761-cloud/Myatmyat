@@ -52,7 +52,7 @@ async def get_file_content(path):
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{path}"
     headers = {"Authorization": f"token {GITHUB_TOKEN}"}
     async with session.get(url, headers=headers) as response:
-        if response.status == 300:
+        if response.status == 200:
             data = await response.json()
             content = base64.b64decode(data['content']).decode('utf-8')
             return json.loads(content), data['sha']
@@ -314,40 +314,23 @@ async def save_rechecked_codes(chat_id_str, recheck_list, sha):
     await update_file_content("result.json", results, sha, f"Update after recheck for {chat_id_str}")
 
 async def check_session_url(session_url):
-    """Session URL ကို strict query-parameter မလိုဘဲ URL နှင့် server response အပေါ် စစ်ဆေးပါ။"""
+    """Network pre-check မလုပ်ဘဲ Session URL ၏ ပုံစံကိုသာ စစ်ဆေးပါ။"""
     from urllib.parse import urlparse
 
-    # Telegram message ထဲသို့ <...> ဖြင့် paste လုပ်ထားပါက wrapper ကို ဖယ်ပါ။
+    # Telegram မှ <URL> ပုံစံဖြင့် paste လုပ်ထားပါက wrapper ကို ဖယ်ပါ။
     session_url = session_url.strip().strip('<>')
     parsed = urlparse(session_url)
-    if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+
+    # Gateway URL များသည် local IP, hostname သို့မဟုတ် portal domain ဖြစ်နိုင်ပါသည်။
+    # gw_id / mac / sessionId စသည့် query parameter များကို မဖြစ်မနေ မတောင်းပါ။
+    if parsed.scheme not in ('http', 'https'):
+        return False
+    if not parsed.netloc or ' ' in session_url:
         return False
 
-    headers = {
-        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'accept-language': 'en-US,en;q=0.9',
-        'referer': session_url,
-        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/148.0.0.0 Safari/537.36',
-    }
-    try:
-        timeout = aiohttp.ClientTimeout(total=15)
-        async with session.get(
-            session_url,
-            allow_redirects=True,
-            headers=headers,
-            timeout=timeout,
-        ) as response:
-            final_url = str(response.url)
-            print(final_url)
-            # Redirect URL တွင် sessionId ပါလျှင် gateway session အတည်ပြုပါသည်။
-            if re.search(r'[?&]sessionId=[^&#]+', final_url, re.IGNORECASE):
-                return True
-            # Gateway အချို့သည် sessionId မပါဘဲ 200/3xx ပြန်ပေးသောကြောင့်
-            # valid URL ဖြစ်ပြီး server က တုံ့ပြန်ပါက လက်ခံပါ။
-            return response.status < 400
-    except (aiohttp.InvalidURL, aiohttp.ClientError, asyncio.TimeoutError) as e:
-        print(f'[check_session_url] {e}')
-        return False
+    # Server ကို ဤနေရာတွင် မခေါ်ပါ။ မည်သည့် gateway response မဆို
+    # /scan အတွင်း get_session_id() မှ စစ်ဆေးမည်ဖြစ်သည်။
+    return True
 
 @bot.message_handler(commands=['input'])
 async def handle_input(message):
