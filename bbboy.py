@@ -28,6 +28,7 @@ _connector = None
 CONCURRENCY = 1000
 _voucher_sem = None
 _start_time = time.monotonic()
+_last_session_error_log = 0.0
 
 
 def is_admin(chat_id):
@@ -698,6 +699,7 @@ def get_mac():
     return ':'.join(f'{x:02x}' for x in mac)
 
 async def get_session_id(session, session_url, previous_session_id=None):
+    global _last_session_error_log
     from urllib.parse import urlparse, parse_qs
 
     mac = get_mac()
@@ -731,30 +733,54 @@ async def get_session_id(session, session_url, previous_session_id=None):
         if sid:
             return sid
 
-        timeout = aiohttp.ClientTimeout(total=20)
-        async with session.get(
-            session_url,
-            headers=headers,
-            allow_redirects=True,
-            timeout=timeout,
-        ) as req:
-            candidates = [str(req.url)]
-            candidates.extend(str(item.url) for item in getattr(req, 'history', ()))
-            for candidate in candidates:
-                sid = extract_sid(candidate)
-                if sid:
-                    return sid
+        # Gateway တချို့က response နောက်ကျနိုင်သဖြင့် connect/read timeout ခွဲထားပါသည်။
+        timeout = aiohttp.ClientTimeout(total=15, connect=5, sock_connect=5, sock_read=10)
+        last_error = None
+        # Timeout ဖြစ်ပါက request တစ်ခုလျှင် ၂ ကြိမ်သာ retry ပြုလုပ်ပါ။
+        for attempt in range(1, 3):
+            try:
+                async with session.get(
+                    session_url,
+                    headers=headers,
+                    allow_redirects=True,
+                    timeout=timeout,
+                    ssl=False,
+                ) as req:
+                    candidates = [str(req.url)]
+                    candidates.extend(str(item.url) for item in getattr(req, 'history', ()))
+                    for candidate in candidates:
+                        sid = extract_sid(candidate)
+                        if sid:
+                            return sid
 
-            # Gateway အချို့သည် sessionId ကို HTML/JS ထဲတွင်သာ ထည့်ပေးသည်။
-            body = await req.text(errors='ignore')
-            sid = extract_sid(body)
-            if sid:
-                return sid
+                    # Gateway အချို့သည် sessionId ကို HTML/JS ထဲတွင်သာ ထည့်ပေးသည်။
+                    body = await req.text(errors='ignore')
+                    sid = extract_sid(body)
+                    if sid:
+                        return sid
 
-            print(f'[get_session_id] no sessionId; status={req.status}, final_url={req.url}')
-            return previous_session_id
+                    print(f'[get_session_id] attempt {attempt}: no sessionId; status={req.status}, final_url={req.url}')
+                    return previous_session_id
+            except (asyncio.TimeoutError, aiohttp.ServerTimeoutError, aiohttp.ClientError, ValueError) as exc:
+                last_error = exc
+                if attempt < 2:
+                    await asyncio.sleep(1.5)
+
+        # Railway log rate limit မထိစေရန် error ကို အနည်းဆုံး ၆၀ စက္ကန့်ခြားမှသာ log ထုတ်ပါ။
+        now = time.monotonic()
+        if now - _last_session_error_log >= 60:
+            _last_session_error_log = now
+            print(
+                f'[get_session_id] failed after 2 attempts: '
+                f'{type(last_error).__name__ if last_error else "unknown"}. '
+                'Session URL host သည် bot server မှ မရောက်နိုင်ခြင်း ဖြစ်နိုင်ပါသည်.'
+            )
+        return previous_session_id
     except Exception as exc:
-        print(f'[get_session_id] fetch error: {type(exc).__name__}: {exc}')
+        now = time.monotonic()
+        if now - _last_session_error_log >= 60:
+            _last_session_error_log = now
+            print(f'[get_session_id] unexpected fetch error: {type(exc).__name__}: {exc}')
         return previous_session_id
 
 def replace_mac(url, new_mac):
