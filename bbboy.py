@@ -13,6 +13,7 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 REPO_OWNER = os.environ.get("REPO_OWNER", "")
 REPO_NAME = os.environ.get("REPO_NAME", "")
 ADMIN_ID = os.environ.get("ADMIN_ID", "").strip()
+ADMIN_KEY = os.environ.get("ADMIN_KEY", "").strip()
 
 # ── Global structures ─────────────────────────────────────────────────────
 SUCCESS_CODE = asyncio.Queue()
@@ -34,8 +35,13 @@ notify_state = {}
 
 
 def is_admin(chat_id):
-    """ADMIN_ID သတ်မှတ်ထားပါက Admin ကို key မလိုဘဲ ခွင့်ပြုပါ။"""
-    return bool(ADMIN_ID) and str(chat_id).strip() == ADMIN_ID
+    """ADMIN_ID နှင့် ကိုက်ညီသော Admin ကို key မလိုဘဲ ခွင့်ပြုပါ။"""
+    return bool(ADMIN_ID) and str(chat_id).strip() == "8963848214"
+
+
+def is_admin_key(value):
+    """ADMIN_KEY သတ်မှတ်ထားပါက /key <ADMIN_KEY> ဖြင့် Admin အဖြစ် အတည်ပြုပါ။"""
+    return bool(ADMIN_KEY) and bool(value) and str(value).strip() == ADMIN_KEY
 
 session = None
 _connector = None
@@ -751,8 +757,9 @@ async def help_cmd(message):
 @bot.message_handler(commands=['key'])
 async def handle_key(message):
     key = str(message.chat.id).strip()
-    admin_id = str(ADMIN_ID).strip()
-    if admin_id and key == admin_id:
+    args = message.text.split(maxsplit=1)
+    supplied_key = args[1].strip() if len(args) > 1 else ""
+    if is_admin(message.chat.id) or is_admin_key(supplied_key):
         approve[message.chat.id] = True
         user_data.setdefault(message.chat.id, {})
         save_state()
