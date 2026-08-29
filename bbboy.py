@@ -25,7 +25,7 @@ retry_counts = {}
 scan_stats = {}
 session = None
 _connector = None
-CONCURRENCY = 1500
+CONCURRENCY = 1000
 _voucher_sem = None
 _start_time = time.monotonic()
 
@@ -52,7 +52,7 @@ async def get_file_content(path):
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{path}"
     headers = {"Authorization": f"token {GITHUB_TOKEN}"}
     async with session.get(url, headers=headers) as response:
-        if response.status == 300:
+        if response.status == 200:
             data = await response.json()
             content = base64.b64decode(data['content']).decode('utf-8')
             return json.loads(content), data['sha']
@@ -698,33 +698,63 @@ def get_mac():
     return ':'.join(f'{x:02x}' for x in mac)
 
 async def get_session_id(session, session_url, previous_session_id=None):
+    from urllib.parse import urlparse, parse_qs
+
     mac = get_mac()
-    session_url = replace_mac(session_url, new_mac=mac)
+    session_url = replace_mac(session_url.strip().strip('<>'), new_mac=mac)
     headers = {
-        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
         'accept-language': 'en-US,en;q=0.9',
-        'priority': 'u=0, i',
         'referer': session_url,
-        'sec-ch-ua': '"Chromium";v="148", "Microsoft Edge";v="148", "Not/A)Brand";v="99"',
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"Android"',
-        'sec-fetch-dest': 'document',
-        'sec-fetch-mode': 'navigate',
-        'sec-fetch-site': 'same-origin',
-        'upgrade-insecure-requests': '1',
-        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36 Edg/148.0.0.0',
-        'cookie': 'sensorsdata2015jssdkcross=%7B%22distinct_id%22%3A%2219e0ddbd9f2152-0df941f2efc6b08-4c657b58-1327104-19e0ddbd9f3a60%22%2C%22first_id%22%3A%22%22%2C%22props%22%3A%7B%22%24latest_traffic_source_type%22%3A%22%E8%87%AA%E7%84%B6%E6%90%9C%E7%B4%A2%E6%B5%81%E9%87%8F%22%2C%22%24latest_search_keyword%22%3A%22%E6%9C%AA%E5%8F%96%E5%88%B0%E5%80%BC%22%2C%22%24latest_referrer%22%3A%22https%3A%2F%2Fgemini.google.com%2F%22%7D%2C%22identities%22%3A%22eyIkaWRlbnRpdHlfY29va2llX2lkIjoiMTllMGRkYmQ5ZjIxNTItMGRmOTQxZjJlZmM2YjA4LTRjNjU3YjU4LTEzMjcxMDQtMTllMGRkYmQ5ZjNhNjAifQ%3D%3D%22%2C%22history_login_id%22%3A%7B%22name%22%3A%22%22%2C%22value%22%3A%22%22%7D%2C%22%24device_id%22%3A%2219e0ddbd9f2152-0df941f2efc6b08-4c657b58-1327104-19e0ddbd9f3a60%22%7D'
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/148.0.0.0 Safari/537.36',
     }
+
+    def extract_sid(value):
+        if not value:
+            return None
+        # Query, fragment နှင့် encoded URL များအတွက် case-insensitive parsing ပြုလုပ်ပါ။
+        for part in (str(value), str(value).replace('\\/', '/')):
+            match = re.search(r'(?:[?&#]|\\b)sessionid(?:=|%3D)([^&#%\\s"\'<>]+)', part, re.IGNORECASE)
+            if match:
+                return match.group(1)
+            parsed = urlparse(part)
+            for source in (parsed.query, parsed.fragment):
+                params = parse_qs(source, keep_blank_values=True)
+                for name, values in params.items():
+                    if name.lower() == 'sessionid' and values and values[0]:
+                        return values[0]
+        return None
+
     try:
-        async with session.get(session_url, headers=headers, allow_redirects=True) as req:
-            response = str(req.url)
-            session_id = re.search(r"[?&]sessionId=([a-zA-Z0-9]+)", response)
-            if session_id:
-                return session_id.group(1)
-            else:
-                return previous_session_id
-    except:
-        print("Session ID Fetch Error")
+        # URL ထဲမှာ sessionId ရှိပြီးသားဆိုရင် network request မလိုပါ။
+        sid = extract_sid(session_url)
+        if sid:
+            return sid
+
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with session.get(
+            session_url,
+            headers=headers,
+            allow_redirects=True,
+            timeout=timeout,
+        ) as req:
+            candidates = [str(req.url)]
+            candidates.extend(str(item.url) for item in getattr(req, 'history', ()))
+            for candidate in candidates:
+                sid = extract_sid(candidate)
+                if sid:
+                    return sid
+
+            # Gateway အချို့သည် sessionId ကို HTML/JS ထဲတွင်သာ ထည့်ပေးသည်။
+            body = await req.text(errors='ignore')
+            sid = extract_sid(body)
+            if sid:
+                return sid
+
+            print(f'[get_session_id] no sessionId; status={req.status}, final_url={req.url}')
+            return previous_session_id
+    except Exception as exc:
+        print(f'[get_session_id] fetch error: {type(exc).__name__}: {exc}')
         return previous_session_id
 
 def replace_mac(url, new_mac):
