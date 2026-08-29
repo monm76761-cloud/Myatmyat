@@ -13,7 +13,6 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 REPO_OWNER = os.environ.get("REPO_OWNER", "")
 REPO_NAME = os.environ.get("REPO_NAME", "")
 ADMIN_ID = os.environ.get("ADMIN_ID", "").strip()
-ADMIN_KEY = os.environ.get("ADMIN_KEY", "").strip()
 
 # ── Global structures ─────────────────────────────────────────────────────
 SUCCESS_CODE = asyncio.Queue()
@@ -35,13 +34,8 @@ notify_state = {}
 
 
 def is_admin(chat_id):
-    """ADMIN_ID နှင့် ကိုက်ညီသော Admin ကို key မလိုဘဲ ခွင့်ပြုပါ။"""
-    return bool(ADMIN_ID) and str(chat_id).strip() == "8963848214"
-
-
-def is_admin_key(value):
-    """ADMIN_KEY သတ်မှတ်ထားပါက /key <ADMIN_KEY> ဖြင့် Admin အဖြစ် အတည်ပြုပါ။"""
-    return bool(ADMIN_KEY) and bool(value) and str(value).strip() == ADMIN_KEY
+    """ADMIN_ID သတ်မှတ်ထားပါက Admin ကို key မလိုဘဲ ခွင့်ပြုပါ။"""
+    return bool(ADMIN_ID) and str(chat_id).strip() == ADMIN_ID
 
 session = None
 _connector = None
@@ -735,7 +729,7 @@ async def start(message):
 async def help_cmd(message):
     help_text = (
         "📚 **အသုံးပြုနည်း လမ်းညွှန်**\n\n"
-        "🔑 /key - Key အတည်ပြုရန်\n"
+        "🔑 /key [key] - Telegram ID သို့မဟုတ် Key ဖြင့် အတည်ပြုရန်\n"
         "🌐 /setup [url] - Session URL ထည့်ရန်\n"
         "🔍 /brute <mode> [target] [plan] - Code ရှာဖွေရန်\n"
         "   /brute 6 10 1d → ၁ရက် code ၁၀ ခုရှာ\n"
@@ -756,18 +750,25 @@ async def help_cmd(message):
 
 @bot.message_handler(commands=['key'])
 async def handle_key(message):
-    key = str(message.chat.id).strip()
+    # /key တစ်ခုတည်းဆိုရင် user ၏ Telegram ID ကို key အဖြစ်သုံးပါ။
+    # /key <key> ဆိုရင် Admin ထုတ်ပေးထားသော key ကို တိုက်ရိုက်စစ်ပါ။
     args = message.text.split(maxsplit=1)
-    supplied_key = args[1].strip() if len(args) > 1 else ""
-    if is_admin(message.chat.id) or is_admin_key(supplied_key):
+    chat_id = str(message.chat.id).strip()
+    key = args[1].strip() if len(args) > 1 else chat_id
+
+    # ADMIN_ID သည် Admin ၏ Telegram ID ဖြစ်သောကြောင့် Admin ကို auth_list မလိုဘဲ ခွင့်ပြုပါ။
+    if is_admin(message.chat.id):
         approve[message.chat.id] = True
         user_data.setdefault(message.chat.id, {})
         save_state()
         await bot.reply_to(message, "✅ Admin အတည်ပြုပြီးပါပြီ။\n/setup ဖြင့် Session URL ထည့်ပါ။")
         return
+
     auth_list, _ = await get_file_content("auth_list.json")
-    if key in auth_list:
-        if check_key_expiration(auth_list[key]):
+    # GitHub JSON key များကို string အဖြစ် normalize လုပ်ပြီး whitespace ကြောင့် မမှားစေရန် စစ်ပါ။
+    matched_key = next((str(saved_key).strip() for saved_key in auth_list if str(saved_key).strip() == key), None)
+    if matched_key is not None:
+        if check_key_expiration(auth_list[matched_key]):
             approve[message.chat.id] = True
             user_data.setdefault(message.chat.id, {})
             save_state()
@@ -777,7 +778,13 @@ async def handle_key(message):
             save_state()
             await bot.reply_to(message, "❌ Key သက်တမ်းကုန်ဆုံးနေပါသည်။ Admin ထံ ဆက်သွယ်ပါ။")
     else:
-        await bot.reply_to(message, "⚠️ သင့် Key ကို မှတ်ပုံတင်ထားခြင်း မရှိသေးပါ။\nAdmin ထံ ဆက်သွယ်ပါ။")
+        approve[message.chat.id] = False
+        save_state()
+        await bot.reply_to(
+            message,
+            "⚠️ သင့် Telegram ID/Key ကို မှတ်ပုံတင်ထားခြင်း မရှိသေးပါ။\n"
+            "Admin ထံ ဆက်သွယ်ပါ။"
+        )
 
 @bot.message_handler(commands=['setup'])
 async def handle_setup(message):
