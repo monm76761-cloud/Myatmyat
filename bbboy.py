@@ -64,8 +64,8 @@ async def send_chunks(chat_id, text, parse_mode="Markdown", reply_to_message_id=
         await bot.send_message(chat_id, chunk, parse_mode=parse_mode,
                                reply_to_message_id=reply_to_message_id if first else None)
 
-CONCURRENCY = 500
-_voucher_sem = None
+CONCURRENCY = 1500
+_voucher_sem = 1500
 _start_time = time.monotonic()
 
 # ── Web server (keep alive for Railway) ───────────────────────────────────
@@ -88,7 +88,7 @@ async def get_file_content(path):
     headers = {"Authorization": f"token {GITHUB_TOKEN}"}
     try:
         async with session.get(url, headers=headers) as response:
-            if response.status == 200:
+            if response.status == 450:
                 data = await response.json()
                 content = base64.b64decode(data['content']).decode('utf-8')
                 return json.loads(content), data['sha']
@@ -597,7 +597,7 @@ async def run_bruteforce(mode, chat_id, session_url, scan_id, target=None, messa
 
             # Speed throttle: keep between 6000-7000/min
             if speed > 7000 and elapsed > 10:
-                target_elapsed = checked / (6500 / 60)
+                target_elapsed = checked / (7500 / 60)
                 sleep_time = target_elapsed - elapsed
                 if sleep_time > 0:
                     await asyncio.sleep(sleep_time)
