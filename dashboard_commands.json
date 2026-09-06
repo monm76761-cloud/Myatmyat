@@ -7,5 +7,14 @@
     },
     "createdAt": "2026-09-06T09:34:19.231Z",
     "status": "queued"
+  },
+  {
+    "id": "69481d91-59a5-456d-b9ae-3ec9b274475c",
+    "action": "status",
+    "payload": {
+      "requestedBy": "Sc73EDd3om3QsTUjrGdtiH"
+    },
+    "createdAt": "2026-09-06T10:10:31.973Z",
+    "status": "queued"
   }
 ]
