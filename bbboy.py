@@ -1,4 +1,4 @@
-import telebot, asyncio, aiohttp, json, base64, random, re, os, string, time, uuid
+import telebot, asyncio, aiohttp, json, base64, random, re, os, string, time, uuid, secrets
 from telebot.async_telebot import AsyncTeleBot
 from aiohttp import web
 import cv2
@@ -11,6 +11,8 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 ADMIN_ID = os.environ.get("ADMIN_ID", "")
 REPO_OWNER = os.environ.get("REPO_OWNER", "")
 REPO_NAME = os.environ.get("REPO_NAME", "")
+METRICS_TOKEN = os.environ.get("METRICS_TOKEN", "") or os.environ.get("DASHBOARD_API_TOKEN", "") or os.environ.get("DASHBOARD_PASSWORD", "")
+DASHBOARD_ORIGIN = os.environ.get("DASHBOARD_ORIGIN", "https://stlinkdash-9eyizxud.manus.space").rstrip("/")
 SUCCESS_CODE = asyncio.Queue()
 bot = AsyncTeleBot(BOT_TOKEN)
 user_data = {}
@@ -36,12 +38,67 @@ def is_admin(chat_id):
     return bool(str(ADMIN_ID).strip()) and str(chat_id).strip() == str(ADMIN_ID).strip()
 
 
+def _cors_headers(request):
+    origin = request.headers.get("Origin", "")
+    headers = {"Vary": "Origin"}
+    if origin == DASHBOARD_ORIGIN:
+        headers.update({
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Metrics-Token",
+            "Access-Control-Allow-Methods": "GET, OPTIONS",
+        })
+    return headers
+
+
+def _metrics_authorized(request):
+    if not METRICS_TOKEN:
+        return False
+    auth = request.headers.get("Authorization", "")
+    supplied = auth[7:].strip() if auth.lower().startswith("bearer ") else request.headers.get("X-Metrics-Token", "")
+    return bool(supplied) and secrets.compare_digest(supplied, METRICS_TOKEN)
+
+
+def _metrics_unauthorized(request):
+    headers = _cors_headers(request)
+    headers["WWW-Authenticate"] = 'Bearer realm="STLINK Metrics"'
+    return web.json_response({"ok": False, "error": "metrics authentication required"}, status=401, headers=headers)
+
+
 async def handle(request):
-    return web.Response(text="Bot is awake and running 24/7!")
+    return web.json_response({"ok": True, "service": "stlink-vip-bot", "status": "healthy"}, headers=_cors_headers(request))
+
+
+async def metrics_options(request):
+    return web.Response(status=204, headers=_cors_headers(request))
+
+
+async def metrics(request):
+    if request.method == "OPTIONS":
+        return await metrics_options(request)
+    if request.headers.get("Origin", "") not in {"", DASHBOARD_ORIGIN}:
+        return web.json_response({"ok": False, "error": "origin not allowed"}, status=403)
+    if not _metrics_authorized(request):
+        return _metrics_unauthorized(request)
+    uptime = int(time.monotonic() - _start_time)
+    active_scans = sum(1 for data in scan_tasks.values() if not data["task"].done())
+    payload = {
+        "ok": True,
+        "status": "connected",
+        "service": "stlink-vip-bot",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "uptime_seconds": uptime,
+        "active_scans": active_scans,
+        "users_loaded": len(user_data),
+        "approved_users": sum(1 for value in approve.values() if value),
+        "scan_stats": {str(chat_id): dict(stats) for chat_id, stats in scan_stats.items()},
+    }
+    return web.json_response(payload, headers=_cors_headers(request))
 
 async def web_server():
     app = web.Application()
     app.router.add_get('/', handle)
+    app.router.add_get('/api/metrics', metrics)
+    app.router.add_options('/api/metrics', metrics_options)
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.environ.get('PORT', 8099))
