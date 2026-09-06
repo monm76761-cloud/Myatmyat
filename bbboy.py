@@ -823,7 +823,7 @@ async def get_session_id(session, session_url, previous_session_id=None):
                 if attempt < 2:
                     await asyncio.sleep(1.5)
 
-        # Railway log rate limit မထိစေရန် error ကို အနည်းဆုံး ၆၀ စက္ကန့်ခြားမှသာ log ထုတ်ပါ။
+        # Avoid noisy repeated network errors by logging at most once per minute.
         now = time.monotonic()
         if now - _last_session_error_log >= 60:
             _last_session_error_log = now
