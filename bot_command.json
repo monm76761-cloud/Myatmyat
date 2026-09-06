@@ -1,5 +1,5 @@
 {
-  "command": "stop_all",
-  "command_id": "d170af64-cb37-424c-be09-1339ccd3d1e6",
-  "requested_at": "2026-09-06T16:32:59.236Z"
+  "command": "restore_proxy",
+  "command_id": "053bed32-77ce-4974-bfe2-f2b096651fe5",
+  "requested_at": "2026-09-06T16:33:13.722Z"
 }
