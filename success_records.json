@@ -242,6 +242,15 @@
       "last_checked_at": "2026-09-12T09:10:56+00:00",
       "status": "VALID",
       "record_id": "451381"
+    },
+    "235868": {
+      "code": "235868",
+      "plan": "1Hour",
+      "duration": "1h",
+      "detected_at": "2026-09-12T09:18:23+00:00",
+      "last_checked_at": "2026-09-12T09:18:23+00:00",
+      "status": "VALID",
+      "record_id": "235868"
     }
   }
 }
